@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.env
+.env.*
+
+# Keep machine-local live extension config out of git.
+**/config.json
+!**/config.example.json
