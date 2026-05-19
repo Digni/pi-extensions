@@ -2,12 +2,6 @@
 
 Custom Pi extensions packaged as a local/git-installable Pi package.
 
-## Install locally
-
-```bash
-pi install /Users/fabianfreimuller/Development/Cyphant/pi-extensions
-```
-
 ## Extensions
 
 - `auto-compact` — automatic context compaction helper.
