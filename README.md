@@ -11,6 +11,7 @@ pi install /Users/fabianfreimuller/Development/Cyphant/pi-extensions
 ## Extensions
 
 - `auto-compact` — automatic context compaction helper.
+- `goal` — persistent `/goal` objectives with bounded auto-continuation.
 - `lsp` — LSP-backed diagnostics tool.
 - `read-guard` — guards edits based on prior reads.
 - `safety-gate` — reviews or blocks risky shell commands.
