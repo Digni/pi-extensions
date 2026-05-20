@@ -9,6 +9,7 @@ Custom Pi extensions packaged as a local/git-installable Pi package.
 - `lsp` — LSP-backed diagnostics tool.
 - `read-guard` — guards edits based on prior reads.
 - `safety-gate` — reviews or blocks risky shell commands.
+- `web-search` — DuckDuckGo search and local page fetching without MCP.
 
 ## Config
 

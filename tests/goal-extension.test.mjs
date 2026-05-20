@@ -204,6 +204,109 @@ test("agent_end auto-continues active goals with a bounded follow-up", async () 
 	assert.equal(sentUserMessages.length, 1);
 	assert.equal(sentUserMessages[0].options.deliverAs, "followUp");
 	assert.match(sentUserMessages[0].content, /Continue pursuing/);
+	assert.match(sentUserMessages[0].content, /Do not poll running async subagents just to wait/);
+	assert.match(statuses.get("goal"), /goal:active 3\/8/);
+});
+
+test("agent_end waits without spending a goal turn when a subagent is still running", async () => {
+	const entries = [{
+		type: "custom",
+		customType: "goal-state",
+		data: { objective: "finish audit", status: "active", createdAt: 1, updatedAt: 2, turnsUsed: 2, maxTurns: 8 },
+	}];
+	const { hooks, appended, sentUserMessages, notifications, statuses, ctx } = await loadGoalExtension({ entries });
+
+	await hooks.get("agent_end")({
+		messages: [{
+			role: "toolResult",
+			toolName: "subagent",
+			isError: false,
+			content: [{ type: "text", text: "Run: abc123\nState: running\nActivity: active now" }],
+		}],
+	}, ctx);
+
+	assert.equal(appended.length, 0);
+	assert.equal(sentUserMessages.length, 0);
+	assert.match(statuses.get("goal"), /goal:active 2\/8/);
+	assert.match(notifications.at(-1).message, /waiting/i);
+	assert.match(notifications.at(-1).message, /subagent/i);
+});
+
+test("agent_end waits without spending a goal turn after launching a detached async subagent", async () => {
+	const entries = [{
+		type: "custom",
+		customType: "goal-state",
+		data: { objective: "finish audit", status: "active", createdAt: 1, updatedAt: 2, turnsUsed: 2, maxTurns: 8 },
+	}];
+	const { hooks, appended, sentUserMessages, notifications, statuses, ctx } = await loadGoalExtension({ entries });
+
+	await hooks.get("agent_end")({
+		messages: [{
+			role: "toolResult",
+			toolName: "subagent",
+			isError: false,
+			content: [{ type: "text", text: "Async: worker [abc123]\n\nThe async run is detached. Do not run sleep timers or polling loops just to wait for it.\nIf you have nothing else to do until the async result arrives, end your turn now; Pi will deliver the completion when the run finishes." }],
+		}],
+	}, ctx);
+
+	assert.equal(appended.length, 0);
+	assert.equal(sentUserMessages.length, 0);
+	assert.match(statuses.get("goal"), /goal:active 2\/8/);
+	assert.match(notifications.at(-1).message, /waiting/i);
+	assert.match(notifications.at(-1).message, /subagent/i);
+});
+
+test("agent_end waits when a running subagent status is mixed with other tool results", async () => {
+	const entries = [{
+		type: "custom",
+		customType: "goal-state",
+		data: { objective: "finish audit", status: "active", createdAt: 1, updatedAt: 2, turnsUsed: 2, maxTurns: 8 },
+	}];
+	const { hooks, appended, sentUserMessages, notifications, statuses, ctx } = await loadGoalExtension({ entries });
+
+	await hooks.get("agent_end")({
+		messages: [
+			{
+				role: "toolResult",
+				toolName: "bash",
+				isError: false,
+				content: [{ type: "text", text: "Build succeeded" }],
+			},
+			{
+				role: "toolResult",
+				toolName: "subagent",
+				isError: false,
+				content: [{ type: "text", text: "Run: abc123\nState: running\nActivity: active now" }],
+			},
+		],
+	}, ctx);
+
+	assert.equal(appended.length, 0);
+	assert.equal(sentUserMessages.length, 0);
+	assert.match(statuses.get("goal"), /goal:active 2\/8/);
+	assert.match(notifications.at(-1).message, /waiting/i);
+	assert.match(notifications.at(-1).message, /subagent/i);
+});
+
+test("agent_end continues normally after a subagent completion notification", async () => {
+	const entries = [{
+		type: "custom",
+		customType: "goal-state",
+		data: { objective: "finish audit", status: "active", createdAt: 1, updatedAt: 2, turnsUsed: 2, maxTurns: 8 },
+	}];
+	const { hooks, appended, sentUserMessages, statuses, ctx } = await loadGoalExtension({ entries });
+
+	await hooks.get("agent_end")({
+		messages: [{
+			role: "custom",
+			customType: "subagent-notify",
+			content: "Background task completed: **worker**\n\nAll checks passed.",
+		}],
+	}, ctx);
+
+	assert.equal(appended.at(-1).data.turnsUsed, 3);
+	assert.equal(sentUserMessages.length, 1);
+	assert.match(sentUserMessages[0].content, /Continue pursuing/);
 	assert.match(statuses.get("goal"), /goal:active 3\/8/);
 });
 

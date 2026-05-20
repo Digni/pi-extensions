@@ -92,7 +92,36 @@ function kickoffPrompt(state: GoalState & { objective: string }): string {
 
 function continuationPrompt(state: GoalState & { objective: string }): string {
 	const turnLabel = Math.max(1, state.turnsUsed);
-	return `Continue pursuing the active goal: ${state.objective}\n\nProgress turn ${turnLabel} of ${state.maxTurns}. If the goal is fully achieved and no required work remains, call the goal_complete tool. If you are blocked or need user input, explain that instead of continuing indefinitely.`;
+	return `Continue pursuing the active goal: ${state.objective}\n\nProgress turn ${turnLabel} of ${state.maxTurns}. If the goal is fully achieved and no required work remains, call the goal_complete tool. If you are blocked or need user input, explain that instead of continuing indefinitely. Do not poll running async subagents just to wait; wait for their completion or attention notification instead.`;
+}
+
+function textFromContent(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((item) => {
+			if (typeof item === "string") return item;
+			if (!item || typeof item !== "object") return "";
+			const text = (item as { text?: unknown }).text;
+			return typeof text === "string" ? text : "";
+		})
+		.filter(Boolean)
+		.join("\n");
+}
+
+function isWaitingSubagentResult(message: unknown): boolean {
+	if (!message || typeof message !== "object") return false;
+	const raw = message as { role?: unknown; toolName?: unknown; isError?: unknown; content?: unknown };
+	if (raw.role !== "toolResult" || raw.toolName !== "subagent" || raw.isError === true) return false;
+	const text = textFromContent(raw.content);
+	return /^State:\s*running\b/im.test(text)
+		|| (text.includes("The async run is detached") && text.includes("Pi will deliver the completion when the run finishes"));
+}
+
+function hasWaitingSubagentResult(event: unknown): boolean {
+	if (!event || typeof event !== "object") return false;
+	const messages = (event as { messages?: unknown }).messages;
+	return Array.isArray(messages) && messages.some(isWaitingSubagentResult);
 }
 
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info") {
@@ -270,7 +299,7 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		if (!isActiveGoal(state) || isContinuing) return undefined;
 		if (state.turnsUsed >= state.maxTurns) {
 			persist({ ...state, status: "paused", updatedAt: now(), lastReason: "Paused after reaching the continuation cap" });
@@ -282,6 +311,11 @@ export default function (pi: ExtensionAPI) {
 			if (typeof (ctx as any).hasPendingMessages !== "function") return undefined;
 			if (await (ctx as any).hasPendingMessages()) return undefined;
 		} catch {
+			return undefined;
+		}
+		if (hasWaitingSubagentResult(event)) {
+			setStatus(ctx);
+			notify(ctx, "Goal is waiting for a running async subagent; not spending a continuation turn.", "info");
 			return undefined;
 		}
 		isContinuing = true;
