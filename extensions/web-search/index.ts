@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
 
 type SearchResult = {
 	title: string;
@@ -10,6 +11,7 @@ const DEFAULT_RESULTS = 5;
 const MIN_RESULTS = 1;
 const MAX_RESULTS = 10;
 const SEARCH_TIMEOUT_MS = 30_000;
+const DDG_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/";
 const DEFAULT_FETCH_CHARS = 20_000;
 const MIN_FETCH_CHARS = 1_000;
 const MAX_FETCH_CHARS = 50_000;
@@ -17,28 +19,30 @@ const FETCH_TIMEOUT_MS = 30_000;
 const MAX_FETCH_BYTES = 1_000_000;
 const MAX_REDIRECTS = 5;
 
-const webSearchParameters = {
-	type: "object",
-	properties: {
-		query: { type: "string", description: "Search query" },
-		numResults: { type: "number", description: "Number of results to return (1-10, default 5)" },
-		region: { type: "string", description: "Optional ddgr region, for example us-en or de-de" },
-		time: { type: "string", enum: ["d", "w", "m", "y"], description: "Optional time filter: d, w, m, or y" },
-		site: { type: "string", description: "Optional site/domain filter passed to ddgr --site" },
-	},
-	required: ["query"],
-	additionalProperties: false,
-};
+function stringEnum<T extends readonly string[]>(values: T, options?: { description?: string }) {
+	return Type.Unsafe<T[number]>({
+		type: "string",
+		enum: [...values],
+		...(options?.description ? { description: options.description } : {}),
+	});
+}
 
-const fetchContentParameters = {
-	type: "object",
-	properties: {
-		url: { type: "string", description: "HTTP or HTTPS URL to fetch" },
-		maxChars: { type: "number", description: "Maximum characters to return (1000-50000, default 20000)" },
-	},
-	required: ["url"],
-	additionalProperties: false,
-};
+const webSearchParameters = Type.Object({
+	query: Type.String({ description: "Search query" }),
+	numResults: Type.Optional(Type.Number({ description: "Number of results to return (1-10, default 5)" })),
+	region: Type.Optional(Type.String({ description: "Optional ddgr region, for example us-en or de-de" })),
+	time: Type.Optional(stringEnum(["d", "w", "m", "y"] as const, { description: "Optional time filter: d, w, m, or y" })),
+	site: Type.Optional(Type.String({ description: "Optional site/domain filter passed to ddgr --site" })),
+}, { additionalProperties: false });
+
+type WebSearchParameters = Static<typeof webSearchParameters>;
+
+const fetchContentParameters = Type.Object({
+	url: Type.String({ description: "HTTP or HTTPS URL to fetch" }),
+	maxChars: Type.Optional(Type.Number({ description: "Maximum characters to return (1000-50000, default 20000)" })),
+}, { additionalProperties: false });
+
+type FetchContentParameters = Static<typeof fetchContentParameters>;
 
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
 	const numeric = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : NaN;
@@ -51,15 +55,34 @@ function truncate(value: string, maxChars: number): { text: string; truncated: b
 	return { text: `${value.slice(0, maxChars)}\n… (${value.length - maxChars} more chars truncated)`, truncated: true };
 }
 
-function buildDdgrArgs(params: any): string[] {
+function normalizeSearchQuery(params: WebSearchParameters): string {
 	const query = typeof params.query === "string" ? params.query.trim() : "";
 	if (!query) throw new Error("web_search requires a non-empty query.");
+	return query;
+}
+
+function isSearchTime(value: unknown): value is "d" | "w" | "m" | "y" {
+	return value === "d" || value === "w" || value === "m" || value === "y";
+}
+
+function buildDdgrArgs(params: WebSearchParameters): string[] {
+	const query = normalizeSearchQuery(params);
 	const args = ["--json", "--np", "--num", String(clampInteger(params.numResults, DEFAULT_RESULTS, MIN_RESULTS, MAX_RESULTS))];
 	if (typeof params.region === "string" && params.region.trim()) args.push("--reg", params.region.trim());
-	if (["d", "w", "m", "y"].includes(params.time)) args.push("--time", params.time);
+	if (isSearchTime(params.time)) args.push("--time", params.time);
 	if (typeof params.site === "string" && params.site.trim()) args.push("--site", params.site.trim());
 	args.push(query);
 	return args;
+}
+
+function buildDdgHtmlSearchUrl(params: WebSearchParameters): URL {
+	let query = normalizeSearchQuery(params);
+	if (typeof params.site === "string" && params.site.trim()) query = `site:${params.site.trim()} ${query}`;
+	const url = new URL(DDG_HTML_SEARCH_URL);
+	url.searchParams.set("q", query);
+	if (typeof params.region === "string" && params.region.trim()) url.searchParams.set("kl", params.region.trim());
+	if (isSearchTime(params.time)) url.searchParams.set("df", params.time);
+	return url;
 }
 
 function isMissingCommand(result: any): boolean {
@@ -104,6 +127,44 @@ function formatSearchResults(results: SearchResult[], runner: string): string {
 		if (result.snippet) lines.push(`   ${result.snippet}`);
 	});
 	return lines.join("\n");
+}
+
+function normalizeDdgResultUrl(rawHref: string): string {
+	const href = decodeHtmlEntities(rawHref).trim();
+	try {
+		const url = new URL(href.startsWith("//") ? `https:${href}` : href, "https://duckduckgo.com");
+		const unwrapped = url.hostname.endsWith("duckduckgo.com") && url.pathname === "/l/" ? url.searchParams.get("uddg") : undefined;
+		if (unwrapped) return unwrapped;
+		return url.toString();
+	} catch {
+		return href;
+	}
+}
+
+function parseDdgHtmlResults(html: string, maxResults: number): SearchResult[] {
+	const anchorPattern = /<a\b(?=[^>]*\bclass=(['"])[^'"]*\bresult__a\b[^'"]*\1)[^>]*\bhref=(['"])(.*?)\2[^>]*>([\s\S]*?)<\/a>/gi;
+	const anchors = [...html.matchAll(anchorPattern)].map((match) => ({
+		index: match.index ?? 0,
+		end: (match.index ?? 0) + match[0].length,
+		href: match[3] ?? "",
+		titleHtml: match[4] ?? "",
+	}));
+	const results: SearchResult[] = [];
+	const seenUrls = new Set<string>();
+	for (let index = 0; index < anchors.length && results.length < maxResults; index++) {
+		const anchor = anchors[index];
+		const title = extractHtmlText(anchor.titleHtml);
+		const url = normalizeDdgResultUrl(anchor.href);
+		if (!title && !url) continue;
+		if (url && seenUrls.has(url)) continue;
+		const nextAnchorIndex = anchors[index + 1]?.index ?? html.length;
+		const resultWindow = html.slice(anchor.end, nextAnchorIndex);
+		const snippetMatch = resultWindow.match(/<([a-z0-9]+)\b[^>]*\bclass=(['"])[^'"]*\bresult__snippet\b[^'"]*\2[^>]*>([\s\S]*?)<\/\1>/i);
+		const snippet = snippetMatch ? extractHtmlText(snippetMatch[3] ?? "") : "";
+		if (url) seenUrls.add(url);
+		results.push({ title: title || url, url, snippet });
+	}
+	return results;
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -240,6 +301,39 @@ async function readResponseTextLimited(response: Response): Promise<string> {
 	return new TextDecoder().decode(Buffer.concat(chunks));
 }
 
+async function fetchSearchWithAbort(fetchFn: typeof fetch, url: URL, signal: AbortSignal | undefined) {
+	if (signal?.aborted) throw new Error("web_search aborted before request started.");
+	const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+	let combinedSignal = timeout;
+	if (signal) {
+		const controller = new AbortController();
+		const abort = () => controller.abort();
+		signal.addEventListener("abort", abort, { once: true });
+		timeout.addEventListener("abort", abort, { once: true });
+		combinedSignal = controller.signal;
+	}
+	return fetchFn(url.toString(), {
+		signal: combinedSignal,
+		redirect: "follow",
+		headers: {
+			accept: "text/html,application/xhtml+xml",
+			"user-agent": "Mozilla/5.0 (compatible; pi-web-search/0.1; +https://github.com/earendil-works/pi)",
+		},
+	});
+}
+
+async function runDdgHtmlSearch(ctx: any, params: WebSearchParameters, signal: AbortSignal | undefined) {
+	const url = buildDdgHtmlSearchUrl(params);
+	const response = await fetchSearchWithAbort(getFetch(ctx), url, signal);
+	if (!response.ok) throw new Error(`DuckDuckGo HTML search failed: HTTP ${response.status} ${response.statusText}`.trim());
+	const html = await readResponseTextLimited(response);
+	const results = parseDdgHtmlResults(html, clampInteger(params.numResults, DEFAULT_RESULTS, MIN_RESULTS, MAX_RESULTS));
+	if (results.length === 0 && /(captcha|anomaly|challenge|consent)/i.test(html)) {
+		throw new Error("DuckDuckGo HTML search returned a challenge/consent page instead of results.");
+	}
+	return { runner: "duckduckgo html", searchUrl: url.toString(), results };
+}
+
 async function runDdgr(pi: ExtensionAPI, args: string[], signal: AbortSignal | undefined) {
 	let ddgr: any;
 	try {
@@ -263,20 +357,33 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "web_search",
 		label: "Web Search",
-		description: "Search the web using DuckDuckGo via ddgr. Falls back to `uvx ddgr` when ddgr is not installed. Returns titles, URLs, and snippets.",
-		promptSnippet: "Search the web with DuckDuckGo via ddgr",
+		description: "Search DuckDuckGo using native fetch against the HTML endpoint first. Falls back to `ddgr` / `uvx ddgr` when native search fails. Returns titles, URLs, and snippets.",
+		promptSnippet: "Search the web with DuckDuckGo native HTML fetch, with ddgr fallback",
 		promptGuidelines: ["Use web_search when current web information is needed before answering or implementing."],
 		parameters: webSearchParameters,
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			let nativeError: unknown;
+			try {
+				const native = await runDdgHtmlSearch(ctx, params, signal);
+				return {
+					content: [{ type: "text", text: formatSearchResults(native.results, native.runner) }],
+					details: { query: params.query, runner: native.runner, searchUrl: native.searchUrl, results: native.results },
+				};
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				nativeError = error;
+			}
+
 			const args = buildDdgrArgs(params);
 			const { runner, result } = await runDdgr(pi, args, signal);
 			if (result.code !== 0) {
-				throw new Error(`web_search failed with ${runner} (exit ${result.code}). Install ddgr (for example: brew install ddgr) or ensure uvx can run ddgr. stderr: ${truncate(String(result.stderr ?? ""), 2000).text}`);
+				const nativeMessage = nativeError instanceof Error ? nativeError.message : String(nativeError);
+				throw new Error(`web_search failed with native DuckDuckGo search (${nativeMessage}) and ${runner} (exit ${result.code}). Install ddgr (for example: brew install ddgr) or ensure uvx can run ddgr. stderr: ${truncate(String(result.stderr ?? ""), 2000).text}`);
 			}
 			const results = parseSearchResults(String(result.stdout ?? ""), String(result.stderr ?? ""));
 			return {
 				content: [{ type: "text", text: formatSearchResults(results, runner) }],
-				details: { query: params.query, runner, results },
+				details: { query: params.query, runner, nativeError: nativeError instanceof Error ? nativeError.message : String(nativeError), results },
 			};
 		},
 	});
@@ -287,9 +394,9 @@ export default function (pi: ExtensionAPI) {
 		description: "Fetch an HTTP(S) page and extract readable text locally with a simple HTML stripper. No hosted reader service or MCP is used.",
 		promptSnippet: "Fetch a URL and extract readable text locally",
 		parameters: fetchContentParameters,
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const url = validateHttpUrl((params as any).url);
-			const maxChars = clampInteger((params as any).maxChars, DEFAULT_FETCH_CHARS, MIN_FETCH_CHARS, MAX_FETCH_CHARS);
+		async execute(_toolCallId, params: FetchContentParameters, signal, _onUpdate, ctx) {
+			const url = validateHttpUrl(params.url);
+			const maxChars = clampInteger(params.maxChars, DEFAULT_FETCH_CHARS, MIN_FETCH_CHARS, MAX_FETCH_CHARS);
 			const response = await fetchFollowingSafeRedirects(getFetch(ctx), url, signal);
 			if (!response.ok) throw new Error(`fetch_content failed: HTTP ${response.status} ${response.statusText}`.trim());
 

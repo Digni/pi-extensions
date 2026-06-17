@@ -7,6 +7,7 @@ async function loadWebSearchExtension({ execImpl, fetchImpl } = {}) {
 
 	const tools = new Map();
 	const execCalls = [];
+	const fetchCalls = [];
 	const pi = {
 		registerTool(spec) { tools.set(spec.name, spec); },
 		async exec(command, args, options) {
@@ -17,9 +18,48 @@ async function loadWebSearchExtension({ execImpl, fetchImpl } = {}) {
 	};
 	extension(pi);
 
-	const ctx = { cwd: process.cwd(), signal: undefined, fetch: fetchImpl };
-	return { tools, execCalls, ctx, fetchImpl };
+	const testFetch = async (url, options) => {
+		fetchCalls.push({ url, options });
+		if (!fetchImpl) throw new Error("native fetch unavailable in test");
+		return fetchImpl(url, options);
+	};
+	const ctx = { cwd: process.cwd(), signal: undefined, fetch: testFetch };
+	return { tools, execCalls, fetchCalls, ctx, fetchImpl };
 }
+
+test("web_search parses native DuckDuckGo HTML results without ddgr", async () => {
+	const { tools, execCalls, fetchCalls, ctx } = await loadWebSearchExtension({
+		fetchImpl: async (url) => ({
+			ok: true,
+			status: 200,
+			statusText: "OK",
+			url,
+			headers: { get() { return null; } },
+			async text() {
+				return `<!doctype html>
+					<div class="result results_links results_links_deep web-result">
+						<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpi%3Fx%3D1%26y%3D2">Pi &amp; Search</a>
+						<a class="result__snippet">A <b>native</b> snippet &amp; details.</a>
+					</div>`;
+			},
+		}),
+	});
+
+	const result = await tools.get("web_search").execute("search-native", { query: "pi search", numResults: 2, site: "example.com", region: "us-en", time: "m" }, undefined, undefined, ctx);
+
+	assert.equal(execCalls.length, 0);
+	assert.equal(fetchCalls.length, 1);
+	assert.match(fetchCalls[0].url, /^https:\/\/html\.duckduckgo\.com\/html\/\?/);
+	const searchUrl = new URL(fetchCalls[0].url);
+	assert.equal(searchUrl.searchParams.get("q"), "site:example.com pi search");
+	assert.equal(searchUrl.searchParams.get("kl"), "us-en");
+	assert.equal(searchUrl.searchParams.get("df"), "m");
+	assert.match(result.content[0].text, /Web search results \(runner: duckduckgo html\)/);
+	assert.match(result.content[0].text, /1\. Pi & Search/);
+	assert.match(result.content[0].text, /https:\/\/example\.com\/pi\?x=1&y=2/);
+	assert.equal(result.details.runner, "duckduckgo html");
+	assert.equal(result.details.results[0].snippet, "A native snippet & details.");
+});
 
 test("web_search parses ddgr JSON results", async () => {
 	const { tools, execCalls, ctx } = await loadWebSearchExtension({
@@ -121,7 +161,7 @@ test("web_search reports invalid JSON and runner failures", async () => {
 	});
 	await assert.rejects(
 		() => failed.tools.get("web_search").execute("search-2", { query: "runner fail" }, undefined, undefined, failed.ctx),
-		/web_search failed with uvx ddgr.*brew install ddgr.*uvx failed/s,
+		/web_search failed with native DuckDuckGo search.*uvx ddgr.*brew install ddgr.*uvx failed/s,
 	);
 });
 

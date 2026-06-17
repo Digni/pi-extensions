@@ -756,7 +756,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`Safety auto-reviewing ${toolName} with ${resolvedModels.primary} (fallback ${resolvedModels.fallback})…`, "info");
 				const review = await autoReview(ctx, resolvedModels.primary, resolvedModels.fallback, toolName, inputPreview, findings);
 				if (review.decision === "allow") {
-					ctx.ui.notify(`Safety auto-review allowed: ${review.reason}`, "success");
+					ctx.ui.notify(`Safety auto-review allowed: ${review.reason}`, "info");
 					return { allow: true };
 				}
 				if (review.decision === "block") {

@@ -6,17 +6,17 @@ DuckDuckGo-powered web access for Pi without MCP.
 
 ### `web_search`
 
-Searches DuckDuckGo through [`ddgr`](https://github.com/jarun/ddgr) and returns titles, URLs, and snippets.
+Searches DuckDuckGo with native `fetch` against DuckDuckGo's HTML endpoint and returns titles, URLs, and snippets. If native search fails, it falls back to [`ddgr`](https://github.com/jarun/ddgr) and then `uvx ddgr`.
 
 Parameters:
 
 - `query` — search query.
 - `numResults` — optional, clamped to 1-10, default 5.
-- `region` — optional ddgr region such as `us-en` or `de-de`.
+- `region` — optional DuckDuckGo region such as `us-en` or `de-de`.
 - `time` — optional `d`, `w`, `m`, or `y`.
 - `site` — optional site/domain filter.
 
-The extension tries an installed `ddgr` first. If that is missing, it falls back to `uvx ddgr`.
+The native path has no external binary dependency. `ddgr` remains a fallback for rate limits, markup changes, or challenge/consent responses.
 
 ### `fetch_content`
 
@@ -31,15 +31,13 @@ The extractor is intentionally simple: it strips scripts/styles/tags, decodes co
 
 ## Setup
 
-Recommended:
+No setup is required for the native DuckDuckGo HTML path.
+
+Optional fallback:
 
 ```bash
 brew install ddgr
-```
-
-Fallback, if `uvx` is available:
-
-```bash
+# or, if uvx is available:
 uvx ddgr --json --num 5 "example query"
 ```
 

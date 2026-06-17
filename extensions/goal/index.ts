@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
 
 type GoalStatus = "active" | "paused" | "complete" | "cleared";
 
@@ -15,12 +16,8 @@ type GoalState = {
 const STATE_ENTRY = "goal-state";
 const DEFAULT_MAX_TURNS = 8;
 const GOAL_STATUS_KEY = "goal";
-const EMPTY_PARAMETERS = {
-	type: "object",
-	properties: {},
-	required: [],
-	additionalProperties: false,
-};
+const EMPTY_PARAMETERS = Type.Object({}, { additionalProperties: false });
+type EmptyParameters = Static<typeof EMPTY_PARAMETERS>;
 
 function now() {
 	return Date.now();
@@ -52,11 +49,8 @@ function normalizeState(value: unknown): GoalState | undefined {
 	};
 }
 
-function getBranchEntries(ctx: ExtensionContext): any[] {
-	const sessionManager = ctx.sessionManager as any;
-	if (typeof sessionManager.getBranch === "function") return sessionManager.getBranch();
-	if (typeof sessionManager.getEntries === "function") return sessionManager.getEntries();
-	return [];
+function getBranchEntries(ctx: ExtensionContext): SessionEntry[] {
+	return ctx.sessionManager.getBranch();
 }
 
 function isGoalPresent(state: GoalState | undefined): state is GoalState & { objective: string } {
@@ -129,11 +123,7 @@ function notify(ctx: ExtensionContext, message: string, level: "info" | "warning
 }
 
 async function isIdle(ctx: ExtensionContext): Promise<boolean> {
-	try {
-		return typeof (ctx as any).isIdle !== "function" || (await (ctx as any).isIdle());
-	} catch {
-		return false;
-	}
+	return ctx.isIdle();
 }
 
 export default function (pi: ExtensionAPI) {
@@ -160,7 +150,7 @@ export default function (pi: ExtensionAPI) {
 
 	function sendGoalMessage(ctx: ExtensionContext, content: string, options?: { deliverAs?: "steer" | "followUp" }) {
 		try {
-			(pi as any).sendUserMessage(content, options);
+			pi.sendUserMessage(content, options);
 			return true;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -257,7 +247,7 @@ export default function (pi: ExtensionAPI) {
 		description: "Return the current persistent session goal, if one is set.",
 		promptSnippet: "Inspect the active /goal objective and continuation status",
 		parameters: EMPTY_PARAMETERS,
-		async execute() {
+		async execute(_toolCallId, _params: EmptyParameters) {
 			return {
 				content: [{ type: "text", text: formatGoalStatus(state) }],
 				details: { goal: isGoalPresent(state) ? { ...state } : null },
@@ -275,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 			"Do not use goal_complete merely because the continuation cap is near or because you are stopping work.",
 		],
 		parameters: EMPTY_PARAMETERS,
-		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, _params: EmptyParameters, _signal, _onUpdate, ctx) {
 			if (!isGoalPresent(state)) {
 				return { content: [{ type: "text", text: "No goal is set." }], details: { goal: null } };
 			}
@@ -307,12 +297,7 @@ export default function (pi: ExtensionAPI) {
 			notify(ctx, "Goal paused after reaching the continuation cap", "warning");
 			return undefined;
 		}
-		try {
-			if (typeof (ctx as any).hasPendingMessages !== "function") return undefined;
-			if (await (ctx as any).hasPendingMessages()) return undefined;
-		} catch {
-			return undefined;
-		}
+		if (ctx.hasPendingMessages()) return undefined;
 		if (hasWaitingSubagentResult(event)) {
 			setStatus(ctx);
 			notify(ctx, "Goal is waiting for a running async subagent; not spending a continuation turn.", "info");
