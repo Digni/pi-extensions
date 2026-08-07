@@ -6,7 +6,6 @@ Custom Pi extensions packaged as a local/git-installable Pi package.
 
 - `auto-compact` — automatic context compaction helper.
 - `goal` — persistent `/goal` objectives with bounded auto-continuation.
-- `lsp` — LSP-backed diagnostics tool.
 - `quota` — remaining OpenAI Codex and Kimi Code subscription quota in the footer.
 - `read-guard` — guards edits based on prior reads.
 - `safety-gate` — reviews or blocks risky shell commands.
