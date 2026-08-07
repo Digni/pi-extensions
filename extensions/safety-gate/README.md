@@ -11,7 +11,7 @@ It intercepts dangerous pi tool calls before execution and either asks for confi
 
 Examples of gated operations:
 
-- broad or recursive deletion (`rm -rf`, recursive deletes against `/`, `~`, `..`, wildcards, etc.)
+- broad or recursive deletion (`rm -rf`, recursive deletes against `/`, `~`, `..`, root-level directories/wildcards, etc.)
 - privilege escalation (`sudo`, `doas`, `su`)
 - unsafe permissions/ownership (`chmod 777`, `chmod a+rwx`, `chown`, `chgrp`, especially recursive)
 - disk/system operations (`mkfs`, `dd of=/dev/...`, `diskutil erase`, reboot/shutdown)
@@ -41,7 +41,7 @@ Config precedence is:
 /safety fallback         Pick/list the session fallback reviewer model
 /safety fallback auto    Auto-pick the fallback reviewer from available models
 /safety critical-override on
-                         Session-only escape hatch: critical auto-review BLOCK can be manually overridden
+                         Session-only escape hatch: critical auto-block can be manually overridden
 /safety critical-override off
                          Disable the critical auto-block override for this session
 /safety global auto      Persist global default mode
@@ -53,17 +53,21 @@ If you run `/safety` with no arguments in the TUI, it opens a session mode selec
 
 ## Auto-review models
 
-The built-in primary and fallback reviewer settings are both `auto`. At review time, `auto` is resolved from `ctx.modelRegistry.getAvailable()` and ranked toward fast/cheap model names such as `spark`, `mini`, `flash`, `fast`, `haiku`, `lite`, or `small`.
+The built-in primary and fallback reviewer settings are both `auto`. At review time, `auto` is resolved from `ctx.modelRegistry.getAvailable()` and ranked toward fast/cheap model names such as `spark`, `mini`, `flash`, `fast`, `haiku`, `lite`, or `small`. Terms are matched as complete name tokens, so a name such as `minimax` is not treated as `mini`. Within the same fast-name tier, `openai-codex` models are preferred before cost and token-budget tie-breakers.
 
-The primary auto reviewer uses the top-ranked available model. The fallback auto reviewer uses the next top-ranked model, or the same model if only one model is available.
+On pi versions that expose provider-origin metadata, automatic selection excludes providers registered by extensions because the isolated reviewer intentionally runs with `--no-extensions`. Older pi versions retain the available-model list and fail safely through `UNSURE` if the child cannot invoke a selected provider. The primary auto reviewer uses the top-ranked eligible model. The fallback auto reviewer uses the next top-ranked eligible model, or the same model if only one model is eligible. A model that fails operationally, times out, or returns malformed output is excluded from automatic selection for the rest of that pi session. Explicit model settings are still accepted; an explicit model that the isolated process cannot invoke also fails safely through `UNSURE`.
 
 Auto-review runs reviewers as isolated subprocesses:
 
 ```bash
-pi --no-extensions --model <resolved-model> --mode json -p --no-session --no-tools <review-prompt>
+pi --no-extensions --no-context-files --no-skills --no-prompt-templates \
+  --system-prompt <fixed-safety-prompt> --model <resolved-model> --thinking off \
+  --mode json -p --no-session --no-tools <json-review-input>
 ```
 
-This matches normal pi model invocation and avoids nested in-process provider oddities. Because the isolated subprocess uses `--no-extensions`, models provided only by extensions may not be available there; that failure becomes `UNSURE` and follows the normal fallback/confirmation behavior.
+The child runs from the system temporary directory. It does not load project instructions, extensions, skills, prompt templates, tools, or session history. The tool call is encoded as untrusted JSON data, and only an exact one-line `ALLOW`, `BLOCK`, or `UNSURE` verdict is accepted. Reviewer credentials and network access are still inherited so the selected provider can be called.
+
+The review JSON includes an `initiator` field (`agent` for tool calls, `user` for `!` commands) and an optional `statedIntent` field: the newest assistant message text, or the newest user message when no assistant text exists, truncated to 800 characters. This gives the reviewer the *why* behind a call — without it, the conservative prompt blocks anything whose intent is ambiguous, including benign cleanups such as `rm -rf .pi-subagents`. The system prompt treats both fields as untrusted context, and allows narrow in-working-directory targets that hold regenerable state (caches, run state, build output) when the stated intent matches.
 
 Change models for the current session with:
 
@@ -95,9 +99,11 @@ pi --safety-mode auto \
   --safety-review-fallback-model auto
 ```
 
-The reviewer is deliberately conservative and runs for any static finding severity (`medium`, `high`, or `critical`) while mode is `auto`. It returns `ALLOW`, `BLOCK`, or `UNSURE`; `UNSURE` after fallback falls back to user confirmation when UI is available and blocks in non-interactive mode.
+The reviewer is deliberately conservative and runs for `medium` and `high` findings while mode is `auto`. It returns `ALLOW`, `BLOCK`, or `UNSURE`; `UNSURE` after fallback falls back to user confirmation when UI is available and blocks in non-interactive mode.
 
-By default, `BLOCK` means block. If `/safety critical-override on` is enabled for the current session, a `critical` finding with an auto-review `BLOCK` can be manually overridden in interactive UI. The override is intentionally two-step: first confirm the critical warning, then type the exact phrase `allow critical`. Non-interactive/headless sessions still block.
+`critical` is reserved for catastrophic or broad operations: broad recursive deletion targets, filesystem/disk destruction, recursive permission or ownership changes against broad targets, and writes directly to `/` or the user's home directory. Scoped operations such as `rm -rf node_modules`, `chmod -R 777 ./build`, or `chown -R app ./build` are `high` and receive model review.
+
+Critical findings never reach the reviewer and are auto-blocked. If `/safety critical-override on` is enabled for the current session, a critical call can be manually overridden in interactive UI. The override is intentionally two-step: first confirm the critical warning, then type the exact phrase `allow critical`. Non-interactive/headless sessions always block critical calls.
 
 ## Startup flags
 
